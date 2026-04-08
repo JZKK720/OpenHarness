@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# uv lockfile caches
+.uv/
+
+# Node
+node_modules/
+frontend/terminal/node_modules/
+*.tsbuildinfo
+
+# Runtime data (always mount as a volume)
+.openharness/
+
+# Environment secrets
+.env
+
+# Test / lint artefacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
