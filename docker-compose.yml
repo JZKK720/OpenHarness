@@ -1,0 +1,204 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+# OpenHarness – Docker Compose for inter-container use
+#
+# Topology:
+#
+#   openharness-agent   ← The core harness running as an HTTP service (port 8581).
+#                         Other containers POST /query to it.
+#
+#   mcp-server          ← Example MCP server container (stdio-bridged via socat).
+#                         Replace / extend with your own MCP implementations.
+#
+#   (optional)          ← Your existing service containers: connect them to the
+#                         "ohnet" bridge network and call http://openharness-agent:8581.
+#
+# Quick start:
+#   cp .env.example .env          # fill in ANTHROPIC_API_KEY
+#   docker compose up --build
+#
+# Headless one-shot (no persistent service):
+#   docker compose run --rm openharness-agent oh -p "summarise this repo" --output-format json
+# ─────────────────────────────────────────────
+
+networks:
+  ohnet:
+    driver: bridge
+
+volumes:
+  oh_data:     # persists ~/.openharness/ across restarts
+  oh_workspace: # optional shared workspace mount
+
+services:
+
+  # ──────────────────────────────────────────
+  # 1.  OpenHarness Agent — HTTP shim mode
+  # ──────────────────────────────────────────
+  openharness-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: openharness:latest
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux host access (no-op on Mac/Win)
+    environment:
+      # ── LLM provider ────────────────────────────
+      # Anthropic (default):  set ANTHROPIC_API_KEY=sk-ant-... in .env
+      # Ollama (local):       set ANTHROPIC_API_KEY=openharness-local
+      #                           ANTHROPIC_BASE_URL=http://litellm-proxy:4000
+      #                           ANTHROPIC_MODEL=llama3.2  (must match litellm-config.yaml)
+      ANTHROPIC_API_KEY:  "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_MODEL:    "${ANTHROPIC_MODEL:-claude-sonnet-4-5}"
+      ANTHROPIC_BASE_URL: "${ANTHROPIC_BASE_URL:-}"   # leave blank for Anthropic default
+      # ── HTTP shim activation ────────────────────
+      OH_HTTP_MODE: "1"
+      OH_SHIM_PORT: "8581"
+      # Restrict origins in production to your service names, e.g. "http://my-app:3000"
+      OH_ALLOWED_HOSTS: "*"
+      # ── Default permission mode inside container ─
+      # full_auto: no interactive prompts (required for HTTP mode)
+      OH_PERMISSION_MODE: "full_auto"
+    ports:
+      # Expose on localhost only — remove "127.0.0.1:" to allow LAN access
+      - "127.0.0.1:8581:8581"
+    volumes:
+      # Persist sessions, memory, and settings
+      - oh_data:/root/.openharness
+      # Mount a shared workspace so the agent can read/write project files
+      - oh_workspace:/workspace
+    networks:
+      - ohnet
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8581/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # The HTTP shim requires fastapi + uvicorn; they are not in core deps.
+    # Add them via an extra pip install on startup, or extend pyproject.toml.
+    # Override the entrypoint to add them at container start:
+    entrypoint: >
+      sh -c "uv pip install --quiet fastapi uvicorn &&
+             /entrypoint.sh"
+
+  # ──────────────────────────────────────────
+  # 2.  LiteLLM proxy — Anthropic⇄Ollama bridge
+  #
+  #     Enabled automatically when ANTHROPIC_BASE_URL=http://litellm-proxy:4000
+  #     is set in .env. Otherwise idle (no traffic routed to it).
+  # ──────────────────────────────────────────
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-stable
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "1"]
+    volumes:
+      - ./docker/litellm-config.yaml:/app/config.yaml:ro
+    ports:
+      - "127.0.0.1:4000:4000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach Ollama on the host
+    networks:
+      - ohnet
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ──────────────────────────────────────────
+  # 3.  MCP Server (example — filesystem MCP)
+  #
+  #     Uses the official @modelcontextprotocol/server-filesystem package.
+  #     OpenHarness connects via the mcp/stdio bridge.
+  #
+  #     For HTTP-transport MCP (not yet wired in openharness/mcp/client.py),
+  #     replace this with an HTTP MCP server and configure base_url accordingly.
+  # ──────────────────────────────────────────
+  mcp-filesystem:
+    image: node:18-slim
+    command: >
+      npx -y @modelcontextprotocol/server-filesystem /workspace
+    stdin_open: true   # keeps stdio open so the MCP server doesn't exit on its own
+    volumes:
+      - oh_workspace:/workspace:ro   # read-only for safety; adjust as needed
+    networks:
+      - ohnet
+    # This container is left running so OpenHarness can connect via oh mcp add stdio://...
+    # or via settings.json mcp_servers configuration.
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────
+  # 3.  Example consumer service
+  #
+  #     Any container on "ohnet" can call:
+    #     POST http://openharness-agent:8581/query
+  #       Body: { "prompt": "...", "output_format": "json" }
+  #
+  #     Uncomment and adapt to your own application:
+  # ──────────────────────────────────────────
+  # my-app:
+  #   image: my-app:latest
+  #   environment:
+  #     OPENHARNESS_URL: "http://openharness-agent:8581"
+  #   networks:
+  #     - ohnet
+  #   depends_on:
+  #     openharness-agent:
+  #       condition: service_healthy
+
+  # ──────────────────────────────────────────
+  # 4.  Browser terminal UI (ttyd)
+  #
+  #     Opens the `oh` REPL in any browser:
+  #       http://localhost:8681
+  #
+  #     ttyd proxies a real PTY so the React/Ink TUI renders correctly.
+  # ──────────────────────────────────────────
+  oh-web:
+    image: tsl0922/ttyd:latest
+    restart: unless-stopped
+    command: >
+      ttyd -p 7681 -t fontSize=14 -t theme={"background":"#1e1e2e"}
+      docker exec -it openharness-openharness-agent-1 oh
+    # ttyd needs access to the Docker socket to exec into the agent container
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:8681:7681"
+    networks:
+      - ohnet
+    depends_on:
+      openharness-agent:
+        condition: service_healthy
+
+  # ──────────────────────────────────────────
+  # 5.  Web Console UI
+  #
+  #     React SPA (Vite build → nginx) with two pages:
+  #       Workflows     — streaming prompt form → openharness-agent
+  #       Harness Agent — embedded ttyd terminal (http://localhost:8681)
+  #
+  #     http://localhost:8780
+  #
+  #     To change the embedded ttyd URL at build time:
+  #       docker compose build --build-arg VITE_TTYD_URL=http://myhost:8681 oh-web-ui
+  # ──────────────────────────────────────────
+  oh-web-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        VITE_TTYD_URL: "${VITE_TTYD_URL:-http://localhost:8681}"
+    image: openharness-web:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8780:80"
+    networks:
+      - ohnet
+    depends_on:
+      openharness-agent:
+        condition: service_healthy
