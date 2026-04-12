@@ -6,6 +6,23 @@ The format is based on Keep a Changelog, and this project currently tracks chang
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-04-12
+
+### Added
+
+- Full Docker deployment stack: multi-stage `Dockerfile` for the OpenHarness agent container, `Dockerfile.web` for the standalone React+Vite SPA (nginx:alpine), and a 5-service `docker-compose.yml` (agent `:8581`, LiteLLM proxy `:4000`, MCP filesystem, ttyd `:8681`, web UI `:8780`).
+- `docker/http_shim.py`: FastAPI HTTP shim exposing `/health` and `/query` endpoints so the agent is addressable over plain HTTP in containerised deployments.
+- `docker/litellm-config.yaml`: 11 Ollama model routes pre-configured; default model `gemma4:31b-it-q4_K_M`.
+- `docker/nginx-web.conf`: SSE-safe nginx config (`proxy_buffering off`) for the web UI reverse proxy.
+- `frontend/web/`: standalone React+Vite SPA with Workflows and Harness Agent pages, served independently from the terminal TUI.
+- `.env.example`: documented environment variables for the full Docker stack.
+
+### Fixed
+
+- LiteLLM proxy Docker health check: replaced missing `curl` binary with a Python `urllib` probe and corrected the endpoint to `/health/readiness`.
+
+## [0.1.6] - 2026-04-12
+
 ### Added
 
 - Docker as an alternative sandbox backend (`sandbox.backend = "docker"`) for stronger execution isolation with configurable resource limits, network isolation, and automatic image management.
